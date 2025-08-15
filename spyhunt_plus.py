@@ -27,7 +27,7 @@ from urllib.parse import urljoin, urlparse, urlencode, urlsplit, urlunsplit, par
 
 # ---------------- Konštanty ----------------
 APP = "spyhunt_plus"
-VERSION = "1.3.0"
+VERSION = "1.2.2"
 DEFAULT_TIMEOUT = 12.0
 CONCURRENCY = 100
 USER_AGENT = f"{APP}/{VERSION}"
