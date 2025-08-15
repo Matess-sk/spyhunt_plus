@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SpyHunt+ v1.2.2 — OSINT a web-recon toolkit (monolit, terminálové menu + auto-update pri štarte)
+SpyHunt+ v1.2.3 — OSINT a web-recon toolkit (monolit, terminálové menu + auto-update pri štarte)
 Používaj iba na ciele, na ktoré máš povolenie.
 Repo pre auto-update: https://github.com/Matess-sk/spyhunt_plus
 """
@@ -27,7 +27,7 @@ from urllib.parse import urljoin, urlparse, urlencode, urlsplit, urlunsplit, par
 
 # ---------------- Konštanty ----------------
 APP = "spyhunt_plus"
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 DEFAULT_TIMEOUT = 12.0
 CONCURRENCY = 100
 USER_AGENT = f"{APP}/{VERSION}"
@@ -134,7 +134,7 @@ def _menu_build_argv() -> List[str]:
         ("dork",      "Google dorking (SerpAPI)"),
         ("s3",        "AWS S3 bucket enumeration"),
         ("fuzz",      "Heuristický fuzz (XSS/SQLi/Traversal)"),
-        ("selfupdate","Self-update z GitHubu"),
+        ("selfupdate","Self-update z GitHubu (bez otázok)"),
     ]
     for i,(cmd,desc) in enumerate(items, start=1):
         print(f"{i:2d}) {cmd:11s} — {desc}")
@@ -188,10 +188,8 @@ def _menu_build_argv() -> List[str]:
     elif cmd in ("dork",):
         q = _ask("Dork query", required=True); argv += [q]
     elif cmd in ("selfupdate",):
-        repo = _ask("owner/repo", DEFAULT_REPO)
-        branch = _ask("branch", DEFAULT_BRANCH)
-        path = _ask("path", DEFAULT_PATH)
-        argv += ["--repo", repo, "--branch", branch, "--path", path]
+        # žiadne otázky, použijú sa DEFAULT_REPO/BRANCH/PATH
+        pass
 
     out = _ask("Výstupný súbor -o (Enter = default)")
     if out:
@@ -986,17 +984,15 @@ async def _client(headers: Optional[List[str]]) -> httpx.AsyncClient:
                 hdrs[k.strip()] = v.strip()
     return httpx.AsyncClient(headers=hdrs)
 
-# ---------------- Self-update (manuálny príkaz) ----------------
+# ---------------- Self-update (bez otázok) ----------------
 async def _download_raw(repo: str, branch: str, path: str) -> Optional[bytes]:
     url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(url, timeout=20)
     return r.content if r.status_code == 200 else None
 
-async def cmd_selfupdate(args):
-    repo   = getattr(args, "repo",   DEFAULT_REPO)
-    branch = getattr(args, "branch", DEFAULT_BRANCH)
-    path   = getattr(args, "path",   DEFAULT_PATH)
+async def cmd_selfupdate(args=None):
+    repo, branch, path = DEFAULT_REPO, DEFAULT_BRANCH, DEFAULT_PATH
     data = await _download_raw(repo, branch, path)
     if not data:
         print(f"[selfupdate] zlyhalo stiahnutie {repo}/{branch}/{path}")
@@ -1081,10 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("fuzz"); s.add_argument("url"); s.set_defaults(func=cmd_fuzz)
     s = sub.add_parser("autorecon"); s.add_argument("url"); s.set_defaults(func=cmd_autorecon)
 
-    s = sub.add_parser("selfupdate", help="Stiahne poslednú verziu spyhunt_plus.py z GitHubu")
-    s.add_argument("--repo", default=DEFAULT_REPO, help="owner/repo")
-    s.add_argument("--branch", default=DEFAULT_BRANCH)
-    s.add_argument("--path", default=DEFAULT_PATH)
+    s = sub.add_parser("selfupdate", help="Stiahne poslednú verziu z GitHubu (bez otázok)")
     s.set_defaults(func=cmd_selfupdate)
 
     s = sub.add_parser("menu", help="Spustí terminálové menu")
