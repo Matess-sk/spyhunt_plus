@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SpyHunt+ v1.2.1 — OSINT a web-recon toolkit
+SpyHunt+ v1.2.2 — OSINT a web-recon toolkit (monolit, terminálové menu + auto-update pri štarte)
 Používaj iba na ciele, na ktoré máš povolenie.
+Repo pre auto-update: https://github.com/Matess-sk/spyhunt_plus
 """
 
 from __future__ import annotations
@@ -24,6 +25,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlencode, urlsplit, urlunsplit, parse_qsl
 
+# ---------------- Konštanty ----------------
+APP = "spyhunt_plus"
+VERSION = "1.3.0"
+DEFAULT_TIMEOUT = 12.0
+CONCURRENCY = 100
+USER_AGENT = f"{APP}/{VERSION}"
+
+# Auto-update cieľ
+DEFAULT_REPO   = "Matess-sk/spyhunt_plus"
+DEFAULT_BRANCH = "main"
+DEFAULT_PATH   = "spyhunt_plus.py"
+
 # ---------------- Závislosti ----------------
 try:
     import httpx  # povinné
@@ -33,7 +46,7 @@ except Exception:
 
 # voliteľné
 try:
-    import mmh3  # favicon hash (Shodan štýl)
+    import mmh3  # favicon hash
 except Exception:
     mmh3 = None  # type: ignore
 
@@ -41,13 +54,6 @@ try:
     import dns.resolver  # type: ignore
 except Exception:
     dns = None  # type: ignore
-
-# ---------------- Konštanty ----------------
-APP = "spyhunt_plus"
-VERSION = "1.2.1"
-DEFAULT_TIMEOUT = 12.0
-CONCURRENCY = 100
-USER_AGENT = f"{APP}/{VERSION}"
 
 # ---------------- Pomocné typy a utily ----------------
 @dc.dataclass
@@ -96,7 +102,7 @@ async def fetch(client: httpx.AsyncClient, method: str, url: str, **kw) -> Optio
     except Exception:
         return None
 
-# ---------------- Interaktívne menu (CLI bez argumentov) ----------------
+# ---------------- Interaktívne MENU (terminál) ----------------
 def _ask(prompt: str, default: Optional[str]=None, required: bool=False) -> str:
     while True:
         s = input(f"{prompt}" + (f" [{default}]" if default else "") + ": ").strip()
@@ -107,7 +113,7 @@ def _ask(prompt: str, default: Optional[str]=None, required: bool=False) -> str:
         print("Hodnota je povinná.")
 
 def _menu_build_argv() -> List[str]:
-    print("\n=== SpyHunt+ 1.2.1 — Interaktívne menu ===")
+    print("\n=== SpyHunt+ — Interaktívne menu ===")
     items = [
         ("autorecon", "Auto Recon (CMS, CVE, theme, crawl, fuzz, headers)"),
         ("cms",       "CMS/Theme/Plugins audit + CVE"),
@@ -182,19 +188,27 @@ def _menu_build_argv() -> List[str]:
     elif cmd in ("dork",):
         q = _ask("Dork query", required=True); argv += [q]
     elif cmd in ("selfupdate",):
-        repo = _ask("owner/repo", "tvojUser/spyhunt-plus")
-        branch = _ask("branch", "main")
-        path = _ask("path", "spyhunt_plus.py")
+        repo = _ask("owner/repo", DEFAULT_REPO)
+        branch = _ask("branch", DEFAULT_BRANCH)
+        path = _ask("path", DEFAULT_PATH)
         argv += ["--repo", repo, "--branch", branch, "--path", path]
 
     out = _ask("Výstupný súbor -o (Enter = default)")
     if out:
         argv = ["-o", out] + argv
-    extra_hdrs=[]
-    while True:
-        h = _ask("Pridať HTTP header 'Key: Value'? (Enter = nie)", None, False)
-        if not h: break
-        extra_hdrs += ["--header", h]
+
+    # Hlavičky: áno/nie → potom Key: Value
+    extra_hdrs = []
+    want_hdr = _ask("Chceš pridať HTTP header? (y/N)", "N").lower()
+    if want_hdr in ("y", "yes", "ano", "a"):
+        while True:
+            kv = _ask("Zadaj header vo formáte 'Key: Value' (Enter = koniec)")
+            if not kv:
+                break
+            if ":" not in kv:
+                print("Neplatný formát. Použi 'Key: Value'.")
+                continue
+            extra_hdrs += ["--header", kv]
     if extra_hdrs:
         argv = extra_hdrs + argv
     return argv
@@ -279,7 +293,10 @@ async def favicon_hash(base: str, client: httpx.AsyncClient) -> Optional[int]:
     r = await fetch(client, "GET", norm_url(base).rstrip("/") + "/favicon.ico")
     if not r or r.status_code >= 400 or not mmh3:
         return None
-    return mmh3.hash(base64.b64encode(r.content))
+    try:
+        return mmh3.hash(base64.b64encode(r.content))
+    except Exception:
+        return None
 
 # ---------------- Host header injection ----------------
 async def host_header_test(url: str, client: httpx.AsyncClient) -> List[Dict[str, Any]]:
@@ -396,13 +413,14 @@ async def detect_cms(url: str, client: httpx.AsyncClient) -> Dict[str, Any]:
         "version": version
     }
 
-# ---------------- WP jadro: latest verzia + porovnanie ----------------
+# ---------------- Ver porovnávanie ----------------
 def _ver_tuple(v: Optional[str]) -> tuple:
     if not v:
         return tuple()
     nums = re.findall(r"\d+", v)
     return tuple(int(x) for x in nums[:3])
 
+# ---------------- WP jadro: latest ----------------
 async def wp_core_latest(client: httpx.AsyncClient) -> Optional[str]:
     u = "https://api.wordpress.org/core/version-check/1.7/"
     r = await fetch(client, "GET", u)
@@ -780,53 +798,7 @@ async def auto_recon(target: str, client: httpx.AsyncClient, out: Path) -> None:
     xss  = await fuzz_get_params(target, client, "xss",  XSS_PAYLOADS)
     jsonl_write(out, {"module": "fuzz", "target": target, "traversal": trav, "sqli": sqli, "xss": xss})
 
-# ======================= CLI =======================
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog=APP, description="OSINT/Web recon toolkit", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("-o", "--out", default=f"{APP}.jsonl", help="Výstupný JSONL")
-    p.add_argument("--rps", type=float, default=0.0, help="Rate-limit req/s")
-    p.add_argument("--header", action="append", help="Custom header 'Key: Value' (repeatable)")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    s = sub.add_parser("subdomains"); s.add_argument("domain"); s.add_argument("-w","--wordlist"); s.set_defaults(func=cmd_subdomains)
-    s = sub.add_parser("dns"); s.add_argument("name"); s.add_argument("-t","--type", default="A"); s.set_defaults(func=cmd_dns)
-    s = sub.add_parser("crawl"); s.add_argument("url"); s.add_argument("--max", type=int, default=100); s.set_defaults(func=cmd_crawl)
-    s = sub.add_parser("favicon"); s.add_argument("url"); s.set_defaults(func=cmd_favicon)
-    s = sub.add_parser("hosttest"); s.add_argument("url"); s.set_defaults(func=cmd_host)
-    s = sub.add_parser("secheads"); s.add_argument("url"); s.set_defaults(func=cmd_secheads)
-    s = sub.add_parser("wayback"); s.add_argument("domain"); s.set_defaults(func=cmd_wayback)
-    s = sub.add_parser("broken"); s.add_argument("input"); s.set_defaults(func=cmd_broken)
-    s = sub.add_parser("smuggle"); s.add_argument("url"); s.set_defaults(func=cmd_smuggle)
-    s = sub.add_parser("cms"); s.add_argument("url"); s.set_defaults(func=cmd_cms)
-    s = sub.add_parser("dirb"); s.add_argument("base"); s.add_argument("-w","--wordlist"); s.set_defaults(func=cmd_dirb)
-    s = sub.add_parser("ports"); s.add_argument("target"); s.add_argument("--ports"); s.add_argument("--cidr"); s.add_argument("--top", action="store_true"); s.set_defaults(func=cmd_ports)
-    s = sub.add_parser("nmap"); s.add_argument("target"); s.add_argument("--fast", action="store_true"); s.set_defaults(func=cmd_nmap)
-    s = sub.add_parser("nuclei"); s.add_argument("target"); s.add_argument("-t","--templates"); s.set_defaults(func=cmd_nuclei)
-    s = sub.add_parser("shodan"); s.add_argument("host"); s.set_defaults(func=cmd_shodan)
-    s = sub.add_parser("dork"); s.add_argument("query"); s.set_defaults(func=cmd_dork)
-    s = sub.add_parser("s3"); s.add_argument("domain"); s.set_defaults(func=cmd_s3)
-    s = sub.add_parser("fuzz"); s.add_argument("url"); s.set_defaults(func=cmd_fuzz)
-    s = sub.add_parser("autorecon"); s.add_argument("url"); s.set_defaults(func=cmd_autorecon)
-
-    s = sub.add_parser("selfupdate", help="Stiahne poslednú verziu spyhunt_plus.py z GitHubu")
-    s.add_argument("--repo", default="tvojUser/spyhunt-plus", help="owner/repo")
-    s.add_argument("--branch", default="main")
-    s.add_argument("--path", default="spyhunt_plus.py")
-    s.set_defaults(func=cmd_selfupdate)
-
-    return p
-
-# ---- HTTP klient s podporou custom hlavičiek ----
-async def _client(headers: Optional[List[str]]) -> httpx.AsyncClient:
-    hdrs = {"User-Agent": USER_AGENT}
-    if headers:
-        for h in headers:
-            if ":" in h:
-                k, v = h.split(":", 1)
-                hdrs[k.strip()] = v.strip()
-    return httpx.AsyncClient(headers=hdrs)
-
-# ---- Handlery príkazov ----
+# ---------------- Handlery príkazov ----------------
 async def cmd_subdomains(args):
     words = COMMON_SUBS
     if args.wordlist:
@@ -1004,28 +976,141 @@ async def cmd_autorecon(args):
         await auto_recon(args.url, client, Path(args.out))
     print("[autorecon] done")
 
-# ---------------- selfupdate ----------------
-async def cmd_selfupdate(args):
-    url = f"https://raw.githubusercontent.com/{args.repo}/{args.branch}/{args.path}"
+# ---------------- HTTP klient s custom hlavičkami ----------------
+async def _client(headers: Optional[List[str]]) -> httpx.AsyncClient:
+    hdrs = {"User-Agent": USER_AGENT}
+    if headers:
+        for h in headers:
+            if ":" in h:
+                k, v = h.split(":", 1)
+                hdrs[k.strip()] = v.strip()
+    return httpx.AsyncClient(headers=hdrs)
+
+# ---------------- Self-update (manuálny príkaz) ----------------
+async def _download_raw(repo: str, branch: str, path: str) -> Optional[bytes]:
+    url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(url, timeout=20)
-    if r.status_code != 200:
-        print(f"[selfupdate] HTTP {r.status_code}: {url}")
+    return r.content if r.status_code == 200 else None
+
+async def cmd_selfupdate(args):
+    repo   = getattr(args, "repo",   DEFAULT_REPO)
+    branch = getattr(args, "branch", DEFAULT_BRANCH)
+    path   = getattr(args, "path",   DEFAULT_PATH)
+    data = await _download_raw(repo, branch, path)
+    if not data:
+        print(f"[selfupdate] zlyhalo stiahnutie {repo}/{branch}/{path}")
         return
     target = Path(__file__).resolve()
     backup = target.with_suffix(".py.bak")
-    backup.write_bytes(target.read_bytes())
-    target.write_bytes(r.content)
+    with contextlib.suppress(Exception):
+        if target.exists():
+            backup.write_bytes(target.read_bytes())
+    target.write_bytes(data)
     print(f"[selfupdate] aktualizované -> {target.name} (backup: {backup.name})")
+    print("[selfupdate] reštartujem...")
+    os.execv(sys.executable, [sys.executable, str(target)] + sys.argv[1:])
+
+# ---------------- Auto-update pri štarte ----------------
+async def _fetch_remote_version(repo: str, branch: str, path: str) -> Optional[str]:
+    url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
+            r = await client.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        m = re.search(r'VERSION\s*=\s*["\']([\d\.]+)["\']', r.text)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+async def _do_selfupdate(repo: str, branch: str, path: str) -> bool:
+    data = await _download_raw(repo, branch, path)
+    if not data:
+        return False
+    target = Path(__file__).resolve()
+    backup = target.with_suffix(".py.bak")
+    with contextlib.suppress(Exception):
+        if target.exists():
+            backup.write_bytes(target.read_bytes())
+    target.write_bytes(data)
+    print(f"[update] aktualizované -> {target.name} (backup: {backup.name})")
+    return True
+
+async def check_autoupdate_on_start(
+    repo: str = DEFAULT_REPO, branch: str = DEFAULT_BRANCH, path: str = DEFAULT_PATH
+) -> None:
+    if os.getenv("SPYHUNT_NO_UPDATE") == "1":
+        return
+    remote = await _fetch_remote_version(repo, branch, path)
+    if not remote:
+        return
+    if _ver_tuple(remote) > _ver_tuple(VERSION):
+        ans = input(f"[update] dostupná verzia {remote} (aktuálne {VERSION}). Aktualizovať? (y/N): ").strip().lower()
+        if ans in ("y", "yes", "ano", "a"):
+            ok = await _do_selfupdate(repo, branch, path)
+            if ok:
+                print("[update] reštartujem skript...")
+                os.execv(sys.executable, [sys.executable, __file__] + sys.argv[1:])
+
+# ---------------- CLI parser ----------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog=APP, description="OSINT/Web recon toolkit", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("-o", "--out", default=f"{APP}.jsonl", help="Výstupný JSONL")
+    p.add_argument("--rps", type=float, default=0.0, help="Rate-limit req/s")
+    p.add_argument("--header", action="append", help="Custom header 'Key: Value' (repeatable)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("subdomains"); s.add_argument("domain"); s.add_argument("-w","--wordlist"); s.set_defaults(func=cmd_subdomains)
+    s = sub.add_parser("dns"); s.add_argument("name"); s.add_argument("-t","--type", default="A"); s.set_defaults(func=cmd_dns)
+    s = sub.add_parser("crawl"); s.add_argument("url"); s.add_argument("--max", type=int, default=100); s.set_defaults(func=cmd_crawl)
+    s = sub.add_parser("favicon"); s.add_argument("url"); s.set_defaults(func=cmd_favicon)
+    s = sub.add_parser("hosttest"); s.add_argument("url"); s.set_defaults(func=cmd_host)
+    s = sub.add_parser("secheads"); s.add_argument("url"); s.set_defaults(func=cmd_secheads)
+    s = sub.add_parser("wayback"); s.add_argument("domain"); s.set_defaults(func=cmd_wayback)
+    s = sub.add_parser("broken"); s.add_argument("input"); s.set_defaults(func=cmd_broken)
+    s = sub.add_parser("smuggle"); s.add_argument("url"); s.set_defaults(func=cmd_smuggle)
+    s = sub.add_parser("cms"); s.add_argument("url"); s.set_defaults(func=cmd_cms)
+    s = sub.add_parser("dirb"); s.add_argument("base"); s.add_argument("-w","--wordlist"); s.set_defaults(func=cmd_dirb)
+    s = sub.add_parser("ports"); s.add_argument("target"); s.add_argument("--ports"); s.add_argument("--cidr"); s.add_argument("--top", action="store_true"); s.set_defaults(func=cmd_ports)
+    s = sub.add_parser("nmap"); s.add_argument("target"); s.add_argument("--fast", action="store_true"); s.set_defaults(func=cmd_nmap)
+    s = sub.add_parser("nuclei"); s.add_argument("target"); s.add_argument("-t","--templates"); s.set_defaults(func=cmd_nuclei)
+    s = sub.add_parser("shodan"); s.add_argument("host"); s.set_defaults(func=cmd_shodan)
+    s = sub.add_parser("dork"); s.add_argument("query"); s.set_defaults(func=cmd_dork)
+    s = sub.add_parser("s3"); s.add_argument("domain"); s.set_defaults(func=cmd_s3)
+    s = sub.add_parser("fuzz"); s.add_argument("url"); s.set_defaults(func=cmd_fuzz)
+    s = sub.add_parser("autorecon"); s.add_argument("url"); s.set_defaults(func=cmd_autorecon)
+
+    s = sub.add_parser("selfupdate", help="Stiahne poslednú verziu spyhunt_plus.py z GitHubu")
+    s.add_argument("--repo", default=DEFAULT_REPO, help="owner/repo")
+    s.add_argument("--branch", default=DEFAULT_BRANCH)
+    s.add_argument("--path", default=DEFAULT_PATH)
+    s.set_defaults(func=cmd_selfupdate)
+
+    s = sub.add_parser("menu", help="Spustí terminálové menu")
+    s.set_defaults(func=lambda a: None)  # obslúži sa v amain()
+
+    return p
 
 # ---------------- main ----------------
 async def amain(argv: Optional[List[str]] = None) -> int:
+    # auto-update check pred štartom
+    await check_autoupdate_on_start()
+
+    # bez argumentov → terminálové menu
     if argv is None and len(sys.argv) <= 1:
         try:
             argv = _menu_build_argv()
         except SystemExit:
             return 0
+
     parser = build_parser(); args = parser.parse_args(argv)
+
+    # explicitný "menu" príkaz
+    if args.cmd == "menu":
+        argv2 = _menu_build_argv()
+        return await amain(argv2)
+
     try:
         await args.func(args)  # type: ignore
         return 0
